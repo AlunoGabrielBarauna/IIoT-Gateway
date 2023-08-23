@@ -1,0 +1,554 @@
+
+Function OPCComm_Create(GatewayID)
+Dim driverName, strQuery, sql, numCur, numRows, row, DrvStation, retFunc, nodeType, sqlOPC, sqlStackLights, sqlESIM, endTaskTS, IsRunning,SQLAndonButton,SQLMPH,IntermediateSQL
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next	
+	OPCComm_Create = 0	
+	$EndTask("OPCUAClient") //Stop OPC UA 
+
+//Wait until task ends
+	endTaskTS = $DateTime2Clock($Date, $Time)
+	IsRunning = $IsTaskRunning("OPCUAClient")
+	Do While IsRunning = 1
+		IsRunning = $IsTaskRunning("OPCUAClient")		
+		If $DateTime2Clock($Date, $Time) > endTaskTS+10 Then
+			Exit Do
+		End If	
+	Loop
+
+	Call RemoveOPCUA()	
+	Call BuildAllConnectionsOPCUA() //Recreate all OPC UA Connections
+
+	sql= "Select o.Name as DrvStation from [CommSettingsTag] e inner Join [OPCConnections] o On o.[ConnId] = e.[OPCConnID] where e.[GatewayID]=" & GatewayID & " AND DrvName = 'OPC UA'"	
+	numCur = $DBCursorOpenSQL("DB", sql)
+	If numCur>0 Then
+		numRows = $DBCursorRowCount(numCur)
+		If numRows>0 Then				
+			For row=1 To numRows
+				DrvStation = $DBCursorGetValue(numCur, "DrvStation")
+				If Trim(DrvStation)<>"" Then
+					$Trace("Event: Creating OPC Sheets")																			'						
+							
+					sqlOPC = " select ('Workstation'+ cast(nodeid as nvarchar(8)) +  TagName) as Tag_Name, DrvAdr as Tag_Address,'' as Tag_Div, "_
+									& "'' as Tag_Add, '1' as Tag_Action,'0' as Tag_Scan, [DrvStation] as Tag_Station "_
+									& "from CommTags t Left Join [CommSettingsTag] s On s.tagID = t.tagID "_
+									& "inner Join [OPCConnections] o On o.[ConnId] = s.[OPCConnID] "_
+									& "where s.[GatewayID]=" & GatewayID
+
+									 
+					retFunc = BuildOPCUA(DrvStation, row, sqlOPC , "","", "","")  					
+					If retFunc<0 Then OPCComm_Create = -1					
+					$Trace("Event: Created OPC Sheets")				
+				End If			
+				$DBCursorNext(numCur)
+			Next
+			$StartTask("OPCUAClient")
+		End If
+	End If
+	$DBCursorClose(numCur)
+End Function
+
+Function RemoveOPCUA()
+	$FileDelete($GetAppPath() & "\Config\*.UA")
+End Function
+
+
+Function BuildAllConnectionsOPCUA()
+Dim numRows,numCur, k, sql, ConnName, Endpoint, UserName, Password,ModeID, Protocol
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next
+	$FileDelete($GetAppPath() & "Config\*.uas")	
+	sql = "Select Name,Endpoint,UserName,Password,protocol_name as Protocol, ID as ModeID From OPCConnections o Left Join OPCmessage_security_modes M on o.mode_name = M.mode_name"
+	numCur = $DBCursorOpenSQL("DB", sql)	
+	If numCur >0 Then
+		numRows = $DBCursorRowCount(numCur) 'Check number of tags/lines
+		For k = 1 To numRows 
+			ConnName = $DBCursorGetValue(numCur, "Name")
+			'$Trace(ConnName)
+			Endpoint = $DBCursorGetValue(numCur, "Endpoint")
+			UserName = $DBCursorGetValue(numCur, "UserName")
+			Password = DecryptPassword($DBCursorGetValue(numCur, "Password"))
+			ModeID = $DBCursorGetValue(numCur, "ModeID")
+			Protocol= $DBCursorGetValue(numCur, "Protocol")
+			Call BuildConnectionOPCUA(ConnName, Endpoint, UserName, Password,ModeID,Protocol)
+			$DBCursorNext(numCur)
+		Next
+	End If
+	$DBCursorClose(numCur)
+End Function
+
+Function BuildOPCUA(strConnName, OPCSheetNumber, strQuery, strDescription, strTagDisable, csvRead, csvWrite)
+Dim retOPCUA
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next	
+	retOPCUA = BuildOPCUASheet(strConnName, OPCSheetNumber, strQuery, strDescription, strTagDisable, csvRead, csvWrite)		
+	If retOPCUA >=0 Then
+		$Trace("Event: Created OPC sheet. Driver.")
+		BuildOPCUA = 1
+	Else
+		$Trace("Event: Error Creating OPC sheet.")	
+		BuildOPCUA = -1
+	End If
+End Function
+
+Function BuildOPCUASheet(strConnName, OPCSheetNumber, strQuery, strDescription, strTagDisable, csvRead, csvWrite)
+Dim numRows,numCursor, iCondition, iPos, columnArray(7), txt, row, fileName
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next
+
+	strDescription = "OPC"& $Format("%03s", OPCSheetNumber) & " - Connection: " & strConnName
+	'numCursor = DBCursorOpenSQLExtended("DB",strQuery)		
+	numCursor = $DBCursorOpenSQL("DB",strQuery)	
+	numRows = $DBCursorRowCount(numCursor) 'Check number of tags/lines
+	If numRows >0 Then
+		'OPC Sheet Header
+		txt = strDescription //H1 - Text configured in the Description field 
+		txt = txt & vbCrLf & "UACl"
+		txt = txt & vbCrLf & "0|0|0" //H2|H3|H4 - Version (current value = 0) | Access Level | Password protection
+		txt = txt & vbCrLf & numRows //H5 - Number of lines configured in the body of the OPC UA Client worksheet
+		txt = txt & vbCrLf & "S" & strConnName //H6 - Server Identifier Name
+		txt = txt & vbCrLf & "T" //H7 - Tag configured in the Status field
+		txt = txt & vbCrLf & "T"  //H8 - Tag configured in the Status Message field
+		txt = txt & vbCrLf & "E1000" //H9 - Expression configured in the Publish Rate field
+		txt = txt & vbCrLf & "E" //H10 - Expression configured in the Disable field
+		txt = txt & vbCrLf & "S" //H11 - Text configured in the Root Node or View field
+		txt = txt & vbCrLf & "E1" //H12 - Value configured in the Enable Subscription field
+		txt = txt & vbCrLf & "V64" //H13 - Tag configured in the Read Maximum Group Size field
+		txt = txt & vbCrLf & "T" //H14 - Tag configured in the Synchronous Read Trigger field
+		txt = txt & vbCrLf & "T" //H15 - Tag configured in the Asynchronous Read Trigger field
+		txt = txt & vbCrLf & "T" //H16 - Tag configured in the Read Count field
+		txt = txt & vbCrLf & "T" //H17 - Tag configured in the Read Status field
+		txt = txt & vbCrLf & "T" //H18 - Tag configured in the Read Status Message field
+		txt = txt & vbCrLf & "V100" //H19 - Value configured in the Read Maximum Aging field
+		txt = txt & vbCrLf & "E1" //H20 - Expression configured in the Write On Tag Change field
+		txt = txt & vbCrLf & "V64" //H21 - Value configured in the Write Maximum Group Size field
+		txt = txt & vbCrLf & "T" //H22 - Tag configured in the Synchronous Write Trigger field
+		txt = txt & vbCrLf & "T" //H23 - Tag configured in the Asynchronous Write Trigger field
+		txt = txt & vbCrLf & "T" //H24 - Tag configured in the Write Count field
+		txt = txt & vbCrLf & "T" //H25 - Tag configured in the Write Status field
+		txt = txt & vbCrLf & "T" //H26 - Tag configured in the Write Status Message field
+		txt = txt & vbCrLf & "R" //H27 - Boolean representing the Refresh ID on StartUp check box
+		txt = txt & vbCrLf & "T" //H28 - Tag configured in the Reload Trigger field
+		txt = txt & vbCrLf & "I0" //H29 - Integer representing the Group Data/Event combo box (Data = 0 / Event = 1)
+		txt = txt & vbCrLf & "R1" //H30 - Boolean representing the Ensure Cash Synchronization check box
+		txt = txt & vbCrLf & "R" //H31 - Boolean representing the Enable Bit Notation check box
+		txt = txt & vbCrLf & "E" //H32 - Value configured in the Percent Deadband field
+		txt = txt & vbCrLf & "R" //H33 - Boolean representing the Enable Sampling Rate check box
+		txt = txt & vbCrLf & "E1" //H34 - Expression configured in the Queue Size field
+				
+		txt = txt & vbCrLf & "R" //H35 - ???
+		txt = txt & vbCrLf & "R" //H36 - ???
+		
+		txt = txt & vbCrLf & ";"
+
+		If $DBCursorColumnCount(numCursor) >= 7 Then									 
+			 For iPos=1 To 7 ' Check result from query
+				 columnArray(iPos) = $DBCursorColumnInfo(numCursor,iPos,0)		 
+			Next
+			iCondition = False
+			If	columnArray(1) <> "Tag_Name" Then
+				iCondition = True
+			ElseIf columnArray(2) <> "Tag_Address" Then
+				iCondition = True
+			ElseIf columnArray(3) <> "Tag_Div" Then
+				iCondition = True
+			ElseIf columnArray(4) <> "Tag_Add" Then
+				iCondition = True
+			ElseIf columnArray(5) <> "Tag_Action" Then '0: Read, 1: Write, 2: Read/Write 
+				iCondition = True					
+			ElseIf columnArray(6) <> "Tag_Scan" Then '0:Screen, 1:Always
+				iCondition = True					
+			ElseIf columnArray(7) <> "Tag_Station" Then
+				iCondition = True																
+			End If											
+			If iCondition = False Then			   						
+				For iPos=1 To numRows  ' Add data from DB to the std. driver sheet											
+					'Read data rows
+					Dim tag_Name, 	tag_Station, tag_Action, tag_Address, tag_Scan, Tag_Div, Tag_Add	
+					tag_Name = $DBCursorGetValue(numCursor,"Tag_Name")
+					tag_Station = $DBCursorGetValue(numCursor,"Tag_Station")
+					'tag_Action = $DBCursorGetValue(numCursor,"Tag_Action")
+					tag_Address = Replace($DBCursorGetValue(numCursor,"Tag_Address"),",",".") 
+					tag_Scan = $DBCursorGetValue(numCursor,"Tag_Scan")
+					Tag_Div = Replace($DBCursorGetValue(numCursor,"Tag_Div"),",",".")
+					Tag_Add = Replace($DBCursorGetValue(numCursor,"Tag_Add"),",",".")	
+					'Validate data rows
+					If tag_Name = "" Then tag_Name = " "
+					If tag_Station = "" Then tag_Station = " "
+					'If tag_Action = "" Then tag_Action = " "
+					If tag_Address = "" Then tag_Address = " "
+					If tag_Scan = "" Then tag_Scan = " "
+					If Tag_Div = "" Then Tag_Div = " "
+					If Tag_Add = "" Then Tag_Add= " "
+					//;TB1|SB2|RB3|FB4|FB5|SB6 
+					'OPC Sheet Body
+					If $Num(iPos)>1 Then	txt = txt & vbCrLf
+					txt = txt & "T" & tag_Name //B1   = Tag Name configured in the line 1
+					txt = txt & "|" & "S" '& tag_Address //B2   = Browse Path configured In the line 1
+					txt = txt & "|" & "R" & tag_Scan //B3   = Scan selected In the line 1 (0=Always; 1=Screen)
+					txt = txt & "|" & "F" & Tag_Div //B4   = Div factor configured In the line 1
+					txt = txt & "|" & "F" & Tag_Add //B5   = Add factor configured In the line 1
+					txt = txt & "|" & "S" & tag_Address	//B6   = Array Index configured In the line 1
+					$DBCursorNext(numCursor)
+				Next				
+				$DBCursorClose(numCursor)								
+			Else
+				'Error - Wrong column name
+				BuildOPCUASheet = -2
+				$DBCursorClose(numCursor)
+			End If									
+		Else
+			'Error - Less columns then expected 
+			BuildOPCUASheet = -3
+			$DBCursorClose(numCursor)
+		End If					
+	Else
+		'Error - Connecting to DB or Wrong Query
+		BuildOPCUASheet = -6
+		$DBCursorClose(numCursor)
+	End If
+	'Create OPC Sheet File 
+	fileName = $GetAppPath() & "Config\UACL" & $Format("%03s", OPCSheetNumber) & ".UA"
+	Call vbFileWrite(fileName, txt, 0)	
+End Function
+
+'-----------------------------------------------------------------------------------------------------------------------
+Function DriverComm_Create(GatewayID)
+Dim driverName, strQuery, sql, numCur, numRows, row, drvName, retFunc, nodeType, InterMediateSQL
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next	
+	DriverComm_Create = 0
+	'$Trace	("Inside DriverComm_Create")
+	Call EndTaskDriver(0) //Stop All Drivers
+	$WritePrivateProfileString("UsedDrivers", "Count", "0", $getAppPath() & $SysServer.AppFileName)		//Reset All Drivers
+	
+	InterMediateSQL = ""
+	sql = "Select DrvName from CommTags t left join [CommSettingsTag] s on s.tagID = t.tagID where s.[GatewayID]=" & GatewayID & " AND DrvName  <> '' And DrvName <> 'OPC UA'"
+
+	sql = "Select * from (" &  sql & " )  as TblComm Group by DrvName"
+	 
+	
+	numCur = $DBCursorOpenSQL("DB", sql)
+	If numCur>0 Then
+		numRows = $DBCursorRowCount(numCur)
+		If numRows>0 Then		
+			For row=1 To numRows
+				drvName = $DBCursorGetValue(numCur, "DrvName")
+				If Trim(drvName)<>"" Then
+					$Trace("Event: Creating Driver Sheets")
+					$EndTask("Driver" & drvName)						
+					Call RemoveDriverFiles(drvName)								
+					'
+					Call AddDriverToAPP(drvName)							
+															
+					sql= "select ('Workstation'+ cast(nodeid as nvarchar(8)) +  TagName) as Tag_Name, DrvAdr as Tag_Address,'' as Tag_Div,'' as Tag_Add, '0' as Tag_Action,'1' as Tag_Scan, [DrvStation] as Tag_Station " _
+						& " from CommTags t left join [CommSettingsTag] s on s.tagID = t.tagID where s.[GatewayID]=" & GatewayID & " And DrvName='" & drvName &"'"							 
+														
+					strquery = "Select * from (" & sql& ")  as TblComm"
+					retFunc = CreateMainDrvSheet(drvName, strQuery, "Main Driver Sheet","", "","")	  					
+					If retFunc<0 Then DriverComm_Create = -1					
+					'$Trace("Event: Created Driver Sheets")				
+				End If			
+				$DBCursorNext(numCur)
+			Next
+			retFunc  = CreateMQTTDriver(GatewayID )
+			$Trace("retFunc  :" & retFunc)
+			If retFunc<0 Then DriverComm_Create = -1		
+			
+			$StartTask("Driver")
+		End If
+	End If
+	$DBCursorClose(numCur)
+End Function 
+
+Function RemoveDriverFiles(driverName)
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next	
+	If Trim(driverName)<>"" Then
+		$FileDelete($GetAppPath() & "Config\" & driverName & "*.SDV")	
+		$FileDelete($GetAppPath() & "Config\" & driverName & "*.MDV")			
+		$FileDelete($GetAppPath() & "Config\" & driverName & "*.DRV")				
+	End If			
+End Function
+
+
+Function AddDriverToAPP(driverName)
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next	
+Dim drvCount, drvIdx, drvFound
+	drvCount = $GetPrivateProfileString("UsedDrivers", "Count", "0", $getAppPath() & $SysServer.AppFileName)		
+	If drvCount>0 Then
+		Dim drvList, drvID
+		ReDim drvList(drvCount)
+		For drvIdx = 1 To drvCount
+			drvList(drvIdx) = 	$GetPrivateProfileString("UsedDrivers", "Task" & (drvIdx-1), "", $getAppPath() & $SysServer.AppFileName)		
+			If UCase(drvList(drvIdx)) = "DRIVER " & UCase(driverName) Then
+				drvFound = 1
+			End If			 
+		Next
+	End If				
+	If drvFound = 0 Then
+		drvCount = drvCount + 1
+		$WritePrivateProfileString("UsedDrivers", "Task" & (drvCount -1), "Driver " & CStr(UCase(driverName)), $getAppPath() & $SysServer.AppFileName)	
+		$WritePrivateProfileString("UsedDrivers", "Count", CStr(drvCount), $getAppPath() & $SysServer.AppFileName)	
+	End If	
+End Function
+
+
+Function CreateMainDrvSheet(strDriverName, strQuery,strDescription,strTagDisable,csvRead,csvWrite)
+Dim retDrvMDV, retDrvSDV
+'$Trace("Query Length CreateMainDrvSheet : " & Len(strQuery) )
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next	
+	retDrvMDV = CreateMDVFile(strDriverName, strQuery,strDescription,strTagDisable,csvRead,csvWrite)
+	retDrvSDV = CreateSDVFile(strDriverName, strQuery,strDescription,strTagDisable,csvRead,csvWrite)
+	If retDrvMDV >=0 And retDrvSDV >=0 Then
+		$Trace("Event: Created main driver sheet. Driver: " & UCase(strDriverName))
+		CreateMainDrvSheet = 1
+	Else
+		$Trace("Event: Error Creating main driver sheet. SDV#" & retDrvSDV  & ", MDV#" & retDrvMDV  & " Driver: " & UCase(strDriverName))	
+		CreateMainDrvSheet = -1
+	End If
+	'$AppPostMessage("Driver Runtime - " & UCase(strDriverName), 1332, -1) // Send Message to the Driver	
+End Function
+
+
+Function CreateMDVFile(strDriverName, strQuery,strDescription,strTagDisable,csvRead,csvWrite)
+Dim fso, driverFile, numRows,numCursor, iCondition,iMinMax,iMinValue,iMaxValue, readArray, writeArray, iPos, columnArray(7)
+Dim iAction, iScan, strLine
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next	
+	'Default		
+	iMinMax = ""
+	iMinValue = ""
+	iMaxValue = ""    		
+	CreateMDVFile = 0
+	Set fso = CreateObject("Scripting.FileSystemObject")
+	'Check if driver exists
+	If $FindFile($GetProductPath() & "Drv\" & strDriverName & ".dll")>0 Then
+		' Check number of std. driver sheets
+		$FileDelete($GetAppPath() & "Config\" & strDriverName & ".MDV")				
+		If $FindFile($GetAppPath() & "Config\" & strDriverName & ".MDV")=0 Then			
+			numCursor =$DBCursorOpenSQL("DB",strQuery)	
+			'$Trace(strQuery)			
+			numRows = $DBCursorRowCount(numCursor) 'Check number of tags/lines
+			If numRows >0 Then
+				'Add data to Main driver sheet									
+				Set driverFile = fso.OpenTextFile($GetAppPath() & "Config\" & strDriverName & ".MDV",2,True)									
+				driverFile.WriteLine(strDescription)
+			   driverFile.WriteLine(strDriverName) 
+				driverFile.WriteLine("0|0")
+				driverFile.WriteLine(CStr(numRows))	
+				driverFile.WriteLine("E" & strTagDisable)													 
+				readArray = Split(csvRead,",")				
+				If UBound(readArray)=1 Then 	
+					driverFile.WriteLine("T" & readArray(0))					  
+					driverFile.WriteLine("T" & readArray(1))					  
+				Else
+					driverFile.WriteLine("T" & "")					  
+					driverFile.WriteLine("T" & "")														
+				End If
+				writeArray = Split(csvWrite,",") 
+				If UBound(writeArray)=1 Then 	
+					driverFile.WriteLine("T" & writeArray(0))					  
+					driverFile.WriteLine("T" & writeArray(1))					  					
+				Else
+					driverFile.WriteLine("T" & "")					  
+					driverFile.WriteLine("T" & "")																			
+				End If			 							 								 				
+				driverFile.WriteLine("I" & iMinMax)
+				driverFile.WriteLine("F" & iMinValue)
+				driverFile.WriteLine("F" & iMaxValue)								 
+				If $DBCursorColumnCount(numCursor) >= 7 Then									 
+					 For iPos=1 To 7 ' Check result from query
+						 columnArray(iPos) = $DBCursorColumnInfo(numCursor,iPos,0)		 
+					Next
+					iCondition = False
+					If	columnArray(1) <> "Tag_Name" Then
+						iCondition = True
+					ElseIf columnArray(2) <> "Tag_Address" Then
+						iCondition = True
+					ElseIf columnArray(3) <> "Tag_Div" Then
+						iCondition = True
+					ElseIf columnArray(4) <> "Tag_Add" Then
+						iCondition = True
+					ElseIf columnArray(5) <> "Tag_Action" Then '0: Read, 1: Write, 2: Read/Write 
+						iCondition = True					
+					ElseIf columnArray(6) <> "Tag_Scan" Then '0:Screen, 1:Always
+						iCondition = True					
+					ElseIf columnArray(7) <> "Tag_Station" Then
+						iCondition = True																
+					End If											
+					If iCondition = False Then			   						
+						For iPos=1 To numRows  ' Add data from DB to the std. driver sheet									
+							strLine = "T" & $DBCursorGetValue(numCursor,"Tag_Name") _
+									  & vbTab & "S" & $DBCursorGetValue(numCursor,"Tag_Station") & ""_
+									  & vbTab & "B" & $DBCursorGetValue(numCursor,"Tag_Address") _
+									  & vbTab & "R" & $DBCursorGetValue(numCursor,"Tag_Action") _
+									  & vbTab & "R" & $DBCursorGetValue(numCursor,"Tag_Scan") _																							
+   								  & vbTab & "F" & Replace($DBCursorGetValue(numCursor,"Tag_Div"),",",".") _
+		  							  & vbTab & "F" & Replace($DBCursorGetValue(numCursor,"Tag_Add"),",",".")					   									
+							If iPos=1 Then strLine = $Asc2Str(12) & strLine
+							driverFile.WriteLine(strLine)
+							$DBCursorNext(numCursor)
+						Next								
+						$DBCursorClose(numCursor)				
+					Else
+						'Error - Wrong column name
+						CreateMDVFile = -2
+						$DBCursorClose(numCursor)
+					End If
+					driverFile.Close					
+					Set driverFile = Nothing					
+				Else
+					'Error - Less columns then expected 
+					CreateMDVFile = -3
+					$DBCursorClose(numCursor)
+				End If					
+			Else
+				'Error - Connecting to DB or Wrong Query
+				CreateMDVFile = -6
+				$DBCursorClose(numCursor)
+			End If
+			Set driverFile  = Nothing
+		Else
+				'Error - Driver file already exists
+				CreateMDVFile = -7	
+		End If
+	Else 
+			'Error - Wrong Driver Name
+			CreateMDVFile = -8
+	End If
+	Set fso = Nothing	
+End Function
+
+Function CreateSDVFile(strDriverName, strQuery,strDescription,strTagDisable,csvRead,csvWrite)
+Dim fso, driverFile, numRows,numCursor, iCondition,iMinMax,iMinValue,iMaxValue, readArray, writeArray, iPos, columnArray(7)
+Dim iAction, iScan, strLine
+If $SysServer.DisableResumeNext=0  Then On Error Resume Next	
+	'Default		
+	iMinMax = ""
+	iMinValue = ""
+	iMaxValue = ""    		
+	CreateSDVFile = 0
+	Set fso = CreateObject("Scripting.FileSystemObject")
+	'Check if driver exists
+	If $FindFile($GetProductPath() & "Drv\" & strDriverName & ".dll")>0 Then
+		' Check number of std. driver sheets		
+		$FileDelete($GetAppPath() & "Config\" & strDriverName & ".SDV")			
+		If $FindFile($GetAppPath() & "Config\" & strDriverName & ".SDV")=0 Then			
+			numCursor = $DBCursorOpenSQL("DB",strQuery)				
+			numRows = $DBCursorRowCount(numCursor) 'Check number of tags/lines
+			If numRows >0 Then
+				'Add data to Main driver sheet									
+				Set driverFile = fso.OpenTextFile($GetAppPath() & "Config\" & strDriverName & ".SDV",2,True)									
+				driverFile.WriteLine("1")
+				driverFile.WriteLine(strDescription)
+				driverFile.WriteLine(strTagDisable)	
+				readArray = Split(csvRead,",")				
+				If UBound(readArray)=1 Then 	
+					driverFile.WriteLine(readArray(0))					  
+					driverFile.WriteLine(readArray(1))					  
+				Else
+					driverFile.WriteLine("")					  
+					driverFile.WriteLine("")														
+				End If
+				writeArray = Split(csvWrite,",") 
+				If UBound(writeArray)=1 Then 	
+					driverFile.WriteLine(writeArray(0))					  
+					driverFile.WriteLine(writeArray(1))					  					
+				Else
+					driverFile.WriteLine("")					  
+					driverFile.WriteLine("")																			
+				End If			 							 								 				
+				driverFile.WriteLine(iMinMax)
+				driverFile.WriteLine(iMinValue) 
+				driverFile.WriteLine(iMaxValue)										
+				driverFile.WriteLine(CStr(numRows))    
+				If $DBCursorColumnCount(numCursor) >= 7 Then									 
+					 For iPos=1 To 7 ' Check result from query
+						 columnArray(iPos) = $DBCursorColumnInfo(numCursor,iPos,0)		 
+					Next
+					iCondition = False
+					If	columnArray(1) <> "Tag_Name" Then
+						iCondition = True
+					ElseIf columnArray(2) <> "Tag_Address" Then
+						iCondition = True
+					ElseIf columnArray(3) <> "Tag_Div" Then
+						iCondition = True
+					ElseIf columnArray(4) <> "Tag_Add" Then
+						iCondition = True
+					ElseIf columnArray(5) <> "Tag_Action" Then '0: Read, 1: Write, 2: Read/Write 
+						iCondition = True					
+					ElseIf columnArray(6) <> "Tag_Scan" Then '0:Screen, 1:Always
+						iCondition = True					
+					ElseIf columnArray(7) <> "Tag_Station" Then
+						iCondition = True																
+					End If											
+					If iCondition = False Then			   						
+						For iPos=1 To numRows  ' Add data from DB to the std. driver sheet											
+					'Read data rows
+							Dim tag_Name, 	tag_Station, tag_Action, tag_Address, tag_Scan, Tag_Div, Tag_Add	
+							tag_Name = $DBCursorGetValue(numCursor,"Tag_Name")
+							tag_Station = $DBCursorGetValue(numCursor,"Tag_Station")
+							tag_Action = $DBCursorGetValue(numCursor,"Tag_Action")
+							tag_Address = Replace($DBCursorGetValue(numCursor,"Tag_Address"),",",".") 
+							tag_Scan = $DBCursorGetValue(numCursor,"Tag_Scan")
+							Tag_Div = Replace($DBCursorGetValue(numCursor,"Tag_Div"),",",".")
+							Tag_Add = Replace($DBCursorGetValue(numCursor,"Tag_Add"),",",".")	
+					'Validate data rows
+							If tag_Name = "" Then tag_Name = " "
+							If tag_Station = "" Then tag_Station = " "
+							If tag_Action = "" Then tag_Action = " "
+							If tag_Address = "" Then tag_Address = " "
+							If tag_Scan = "" Then tag_Scan = " "
+							If Tag_Div = "" Then Tag_Div = " "
+							If Tag_Add = "" Then Tag_Add= " "
+							strLine = tag_Name  _
+									  & vbTab & tag_Station _
+									  & vbTab & tag_Address _
+									  & vbTab & tag_Action _
+									  & vbTab & tag_Scan _																							
+   								  & vbTab & Tag_Div _
+		  							  & vbTab & Tag_Add					   																
+							driverFile.WriteLine(strLine)
+							$DBCursorNext(numCursor)
+						Next				
+						$DBCursorClose(numCursor)								
+					Else
+						'Error - Wrong column name
+						CreateSDVFile = -2
+						$DBCursorClose(numCursor)
+					End If
+					driverFile.Close					
+					Set driverFile = Nothing					
+				Else
+					'Error - Less columns then expected 
+					CreateSDVFile = -3
+					$DBCursorClose(numCursor)
+				End If					
+			Else
+				'Error - Connecting to DB or Wrong Query
+				CreateSDVFile = -6
+				$DBCursorClose(numCursor)
+			End If
+			Set driverFile  = Nothing
+		Else
+				'Error - Driver file already exists
+				CreateSDVFile = -7	
+		End If
+	Else 
+			'Error - Wrong Driver Name
+			CreateSDVFile = -8
+	End If
+	Set fso = Nothing	
+End Function
+
+Function CreateMQTTDriver(GatewayID)
+	Dim DrvName,sql,strquery ,retFunc, InstanceName
+
+	DrvName = "MQTT"
+	InstanceName = GetSingleValue("Select [tagValue] from [GeneralSettings] where [tagName] = N'AWSInstance'","tagValue")
+	$Trace("Event: Creating Driver Sheets")
+	$EndTask("Driver" & drvName)						
+	Call RemoveDriverFiles(drvName)								
+	Call AddDriverToAPP(drvName)							
+															
+	sql= "select ('Workstation'+ cast(t.nodeid as nvarchar(8)) +  TagName) as Tag_Name, (Replace(Path,'\','/') + '/' + Label+'/'+tagname + '-'+ cast(t.nodeid as nvarchar(8))) as Tag_Address,'' as Tag_Div, '' as Tag_Add, '1' as Tag_Action,'1' as Tag_Scan, '"&InstanceName &"' as Tag_Station " _
+			& " from CommTags t left join [CommSettingsTag] s on s.tagID = t.tagID left join Devices d on d.NodeId = t.NodeID where s.[GatewayID]=" & GatewayID 							 
+														
+	strquery = "Select * from (" & sql& ")  as TblComm"
+	retFunc = CreateMainDrvSheet(drvName, strQuery, "Main Driver Sheet","", "","")	 
+	CreateMQTTDriver = retFunc 
+End Function
