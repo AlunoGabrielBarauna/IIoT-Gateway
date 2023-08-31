@@ -552,3 +552,90 @@ Function CreateMQTTDriver(GatewayID)
 	retFunc = CreateMainDrvSheet(drvName, strQuery, "Main Driver Sheet","", "","")	 
 	CreateMQTTDriver = retFunc 
 End Function
+
+Function AddTagToDB(tagID,nodeID,tagName,tagType,tagDescription)
+Dim sql //declaração de variaveis
+	
+//montagem da query de insert
+sql = "INSERT INTO commTags(TagID,NodeID,TagName,TagType,TagDescription) VALUES("
+sql = sql & tagID & "," & NodeID & ",'" & tagName &"','"& tagType & "',N'" & tagDescription & "')"
+// uso da função DBExecute para execução da query no banco de dados
+AddTagToDB= $DBExecute("DB", sql)
+	
+End Function
+
+Function updateTagToDB(tagID,nodeID,tagName,tagType,tagDescription)
+Dim sql,ret
+    sql = "update commTags"
+    sql =  sql & " SET TagName=N'" & tagName &"',"
+    sql =  sql & " TagType='"& tagType & "',"
+    sql =  sql & " tagDescription =N'" & tagDescription &"'"
+    sql =  sql & " Where tagID ="& tagID
+    updateTagToDB= DBExecuteQuery("DB", sql)
+End Function
+
+Function EditTagRemove(TagID)
+    Dim sql, ret,msg
+
+    sql = "DELETE FROM commTags where tagID =" & TagID
+    ret = DBExecuteQuery("DB", sql)
+    If ret>=0 Then
+        sql = "DELETE FROM CommSettingsTag where tagID =" & TagID
+        ret = DBExecuteQuery("DB", sql)
+    End If
+EditTagRemove =     ret 
+End Function
+
+Function EditTagRemove(TagID)
+    Dim sql, ret,msg
+
+    sql = "DELETE FROM commTags where tagID =" & TagID
+    ret = DBExecuteQuery("DB", sql)
+    If ret>=0 Then
+        sql = "DELETE FROM CommSettingsTag where tagID =" & TagID
+        ret = DBExecuteQuery("DB", sql)
+    End If
+EditTagRemove =     ret
+
+End Function
+
+Function AddTagSettingsToDB(TagID,DrvStation,DrvAdr,DrvName,TagMode,GatewayID)
+Dim sql,ret,OPCConnID  //declaração de variaveis
+
+//Idetificação da conexaão OPC quando a comunicação é OPC-UA
+If tagmode = 2 Then  
+    OPCConnID  = GetSingleValue("select ConnID from OPCConnections where [Name] = N'"& DrvStation &"'", "ConnID") 
+Else
+    OPCConnID  = 0
+End If
+
+	//montagem da query de Insert
+    sql = "INSERT INTO CommSettingsTag(TagID,DrvStation,DrvAdr,DrvName,GatewayID,OPCConnID) VALUES("
+    sql = sql & tagID & ",N'" & DrvStation& "',N'" & DrvAdr&"',N'"& DrvName& "',"& GatewayID&"," & OPCConnID & ")"
+	// uso da função DBExecute para execução da query no banco de dados
+    AddTagSettingsToDB= $DBExecute("DB", sql)
+	
+End Function
+
+Function UpdateTagSettingsToDB(TagID,DrvStation,DrvAdr,DrvName,TagMode,GatewayID)
+Dim sql,ret,OPCConnID   //declaração de variaveis
+
+//Idetificação da conexaão OPC quando a comunicação é OPC-UA
+If tagmode = 2 Then 
+    OPCConnID  = GetSingleValue("select ConnID from OPCConnections where [Name] = N'"& DrvStation &"'", "ConnID") 
+Else
+    OPCConnID  = 0
+End If
+
+//montagem da query de update
+sql = "update CommSettingsTag"
+sql =  sql & " SET DrvStation='" & DrvStation &"',"
+sql =  sql & " DrvAdr='"& DrvAdr & "',"
+sql =  sql & " DrvName='"& DrvName & "',"
+sql =  sql & " GatewayID=" & GatewayID &","
+sql =  sql & " OPCConnID=" & OPCConnID 
+sql =  sql & " Where tagID =" & no banco de dados
+UpdateTagSettingsToDB= $DBExecute("DB", sql) TagID
+// uso da função DBExecute para execução da query
+	
+End Function
